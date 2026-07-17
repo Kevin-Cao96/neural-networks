@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>动物人脸分类AI系统</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: "PingFang SC", sans-serif;
+        }
+        body {
+            background-color: #f0f4f8;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 700px;
+            margin: 0 auto;
+            background: white;
+            padding: 35px;
+            border-radius: 16px;
+            box-shadow: 0 4px 20px #00000012;
+        }
+        h1 {
+            text-align: center;
+            color: #222;
+            margin-bottom: 30px;
+            font-size: 24px;
+        }
+        .upload-box {
+            border: 2px dashed #4096ff;
+            border-radius: 12px;
+            padding: 50px 20px;
+            text-align: center;
+            cursor: pointer;
+            color: #4096ff;
+            transition: 0.2s;
+        }
+        .upload-box:hover {
+            background: #f0f7ff;
+        }
+        #file-input {
+            display: none;
+        }
+        .preview-area {
+            margin-top: 25px;
+            text-align: center;
+        }
+        #preview-img {
+            max-width: 300px;
+            border-radius: 8px;
+            display: none;
+        }
+        .result-box {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8fafc;
+            border-radius: 12px;
+            display: none;
+        }
+        .prob-item {
+            margin: 12px 0;
+        }
+        .prob-bar-wrap {
+            width: 100%;
+            height: 12px;
+            background: #e2e8f0;
+            border-radius: 6px;
+            margin-top: 6px;
+        }
+        .prob-bar {
+            height: 100%;
+            background: #4096ff;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI 猫狗野生动物人脸分类</h1>
+        <div class="upload-box" id="upload-area">
+            <p>点击或拖拽图片到此处上传</p>
+            <input type="file" id="file-input" accept="image/jpg,image/jpeg,image/png">
+        </div>
+        <div class="preview-area">
+            <img id="preview-img" />
+        </div>
+        <div class="result-box" id="result-box">
+            <h3>识别结果：<span id="pred-label"></span></h3>
+            <p>置信度：<span id="pred-conf"></span>%</p>
+            <div id="prob-wrap"></div>
+        </div>
+    </div>
+
+    <script>
+        const uploadArea = document.getElementById("upload-area");
+        const fileInput = document.getElementById("file-input");
+        const previewImg = document.getElementById("preview-img");
+        const resultBox = document.getElementById("result-box");
+        const predLabel = document.getElementById("pred-label");
+        const predConf = document.getElementById("pred-conf");
+        const probWrap = document.getElementById("prob-wrap");
+
+        uploadArea.addEventListener("click", () => fileInput.click());
+
+        fileInput.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            // 预览原图
+            const url = URL.createObjectURL(file);
+            previewImg.src = url;
+            previewImg.style.display = "block";
+            resultBox.style.display = "none";
+            // 请求API
+            const formData = new FormData();
+            formData.append("file", file);
+            const res = await fetch("http://127.0.0.1:8000/predict", {
+                method: "POST",
+                body: formData
+            });
+            const data = await res.json();
+            // 渲染结果
+            resultBox.style.display = "block";
+            predLabel.innerText = data.predict_class;
+            predConf.innerText = data.confidence;
+            // 清空概率条
+            probWrap.innerHTML = "";
+            for (const [cls, val] of Object.entries(data.all_prob)) {
+                const div = document.createElement("div");
+                div.className = "prob-item";
+                div.innerHTML = `
+                    <span>${cls}：${val}%</span>
+                    <div class="prob-bar-wrap">
+                        <div class="prob-bar" style="width:${val}%"></div>
+                    </div>
+                `;
+                probWrap.appendChild(div);
+            }
+        }
+    </script>
+</body>
+</html>

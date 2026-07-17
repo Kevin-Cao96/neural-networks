@@ -12,6 +12,7 @@ import pandas as pd
 import os
 
 device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+print(device)
 
 image_path = []
 labels = []
@@ -29,6 +30,7 @@ test = left.drop(val.index)
 
 label_encoder = LabelEncoder()
 label_encoder.fit(data_df['labels'])
+print(label_encoder.classes_)
 
 transform = transforms.Compose([
     transforms.Resize((128, 128)),
@@ -139,3 +141,5 @@ for epoch in range(EPOCH):
             acc = (torch.argmax(prediction, dim=1) == label).sum().item()
             testing_acc+= acc
     print(f"Epoch: {epoch}        train_loss: {round(total_loss_train/train_dataloader.__len__(),4)}        val_loss: {round(total_loss_val/validation_dataloader.__len__(), 4)}        train_acc_rate: {round(train_acc/train_dataset.__len__(), 4)}       val_acc_rate: {round(validation_acc/validation_dataset.__len__(), 4)}       test_acc: {testing_acc/test_dataset.__len__():.4f}")
+
+torch.save(model.state_dict(), "./animal-faces/animal_faces_model.pth")
