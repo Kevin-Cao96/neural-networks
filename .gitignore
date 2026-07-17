@@ -1,2 +1,33 @@
 .DS_Store
 **/.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# ML artifacts
+*.pth
+*.pt
+checkpoints/
+runs/
+
+# IDE & tools
+.vscode/
+.agents/
+.codex/
+
+# Notebook auto-saves
+.ipynb_checkpoints/
+
+__pycache__/
+*.pyc
+*.pth
+checkpoints/
+runs/
+.vscode/
+.agents/
+.codex/
