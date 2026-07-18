@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import os
+import yaml
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -21,26 +22,40 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-set_seed()
+# set_seed() 会从 config.yaml 读取 seed，见下方
 
-device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-print(f"Device: {device}")
+# ======== 从 config.yaml 读取配置 ========
+script_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(script_dir, "..", "config.yaml")
+with open(config_path) as f:
+    cfg = yaml.safe_load(f)
+
+set_seed(cfg.get("seed", 42))
+
+dev = cfg.get("device", "auto")
+if dev == "auto":
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+else:
+    device = torch.device(dev)
+print(f"Device: {device}  |  Config: {config_path}")
 
 # ============================================================
 # 数据加载
 # ============================================================
 image_path = []
 labels = []
-root = Path("./animal-faces/afhq")
+root = Path(cfg["data"]["root"])
 for i in root.rglob("*.jpg"):
     image_path.append(str(i))
     labels.append(i.parent.name)
 
 data_df = pd.DataFrame(zip(image_path, labels), columns = ["image_path", "labels"])
 
-train = data_df.sample(frac = 0.7)
+train_ratio = cfg["data"]["train_ratio"]
+val_ratio = cfg["data"]["val_ratio"]
+train = data_df.sample(frac=train_ratio)
 left = data_df.drop(train.index)
-val = left.sample(frac = 0.5)
+val  = left.sample(frac=val_ratio / (1 - train_ratio))
 test = left.drop(val.index)
 
 label_encoder = LabelEncoder()
@@ -50,14 +65,16 @@ print(f"类别: {label_encoder.classes_}")
 # ============================================================
 # Transform（各模型用各自的）
 # ============================================================
+cnn_size = cfg["models"]["cnn"]["input_size"]
 cnn_transform = transforms.Compose([
-    transforms.Resize((128, 128)),
+    transforms.Resize((cnn_size, cnn_size)),
     transforms.ToTensor(),
     transforms.ConvertImageDtype(torch.float)
 ])
 
+hy_size = cfg["models"]["hybrid"]["input_size"]
 hybrid_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((hy_size, hy_size)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
@@ -139,7 +156,9 @@ class ExtraCNNHead(nn.Module):
 class HybridNet(nn.Module):
     def __init__(self, n_cls=3):
         super().__init__()
-        backbone = nn.Sequential(*list(models.resnet50(weights="IMAGENET1K_V2").children())[:-2])
+        bk_name = cfg["models"]["hybrid"]["backbone"]
+        bk_fn = getattr(models, bk_name)
+        backbone = nn.Sequential(*list(bk_fn(weights="DEFAULT").children())[:-2])
         self.backbone = backbone
         self.head = ExtraCNNHead(2048, n_cls)
 
@@ -225,15 +244,16 @@ def train_model(model, name, train_loader, val_loader, test_loader, epochs, lr=1
 print("=" * 60)
 print("训练 [CNN] — 从头学的 3 层卷积")
 print("=" * 60)
-cnn_loader  = DataLoader(cnn_train, batch_size=16, shuffle=True)
-cnn_v_loader = DataLoader(cnn_val,  batch_size=16, shuffle=False)
-cnn_t_loader = DataLoader(cnn_test, batch_size=16, shuffle=False)
+cnn_bs = cfg["models"]["cnn"]["batch_size"]
+cnn_loader  = DataLoader(cnn_train, batch_size=cnn_bs, shuffle=True)
+cnn_v_loader = DataLoader(cnn_val,  batch_size=cnn_bs, shuffle=False)
+cnn_t_loader = DataLoader(cnn_test, batch_size=cnn_bs, shuffle=False)
 
 cnn_model = CNN()
 cnn_hist = train_model(cnn_model, "CNN",
                        cnn_loader, cnn_v_loader, cnn_t_loader,
-                       epochs=10, lr=1e-4)
-torch.save(cnn_model.state_dict(), "cnn_model.pth")
+                       epochs=cfg["models"]["cnn"]["epochs"], lr=cfg["train"]["lr"])
+torch.save(cnn_model.state_dict(), cfg["output"]["cnn_model"])
 
 # ============================================================
 # 训练 2：Hybrid（ResNet50 骨干 + CNN 头）
@@ -242,9 +262,10 @@ print()
 print("=" * 60)
 print("训练 [Hybrid] — ResNet50骨干 + 3层CNN头（骨干冻结）")
 print("=" * 60)
-hy_loader  = DataLoader(hy_train, batch_size=32, shuffle=True)
-hy_v_loader = DataLoader(hy_val,  batch_size=32, shuffle=False)
-hy_t_loader = DataLoader(hy_test, batch_size=32, shuffle=False)
+hy_bs = cfg["models"]["hybrid"]["batch_size"]
+hy_loader  = DataLoader(hy_train, batch_size=hy_bs, shuffle=True)
+hy_v_loader = DataLoader(hy_val,  batch_size=hy_bs, shuffle=False)
+hy_t_loader = DataLoader(hy_test, batch_size=hy_bs, shuffle=False)
 
 hy_model = HybridNet(n_cls=len(data_df['labels'].unique()))
 # 冻结骨干参数
@@ -255,8 +276,8 @@ print(f"  头部参数: {sum(p.numel() for p in hy_model.head.parameters()):,} (
 
 hy_hist = train_model(hy_model, "Hybrid",
                       hy_loader, hy_v_loader, hy_t_loader,
-                      epochs=15, lr=1e-4)
-torch.save(hy_model.state_dict(), "animal_faces_model.pth")
+                      epochs=cfg["models"]["hybrid"]["epochs"], lr=cfg["models"]["hybrid"]["lr"])
+torch.save(hy_model.state_dict(), cfg["output"]["hybrid_model"])
 
 # ============================================================
 # 对比
@@ -295,5 +316,5 @@ plt.plot(hy_hist["val_loss"],    label="Hybrid val")
 plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend(); plt.title("Loss")
 
 plt.tight_layout()
-plt.savefig("comparison.png", dpi=150)
-print("\n对比图已保存 → comparison.png")
+plt.savefig(cfg["output"]["comparison_chart"], dpi=150)
+print(f"\n对比图已保存 → {cfg['output']['comparison_chart']}")

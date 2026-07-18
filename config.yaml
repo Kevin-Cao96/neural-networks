@@ -1,0 +1,46 @@
+#全局随机种子
+seed: 42
+
+#设备: "auto" 自动检测, 也可指定 "cpu" / "mps" / "cuda"
+device: "auto"
+
+#数据集
+data:
+  root: "./animal-faces/afhq"
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+#训练参数
+train:
+  batch_size: 32
+  lr: 1e-4
+  epochs: 10
+  optimizer: "Adam"
+  loss: "CrossEntropyLoss"
+
+#模型配置
+models:
+  cnn:
+    enabled: true
+    input_size: 128
+    batch_size: 16
+    epochs: 10
+    transform: "simple"     # simple | imagenet
+
+  hybrid:
+    enabled: true
+    backbone: "resnet50"    # resnet50 | resnet18
+    input_size: 224
+    batch_size: 32
+    epochs: 10
+    lr: 1e-4
+    freeze_backbone: true
+    transform: "imagenet"   # simple | imagenet
+
+#输出文件
+output:
+  cnn_model: "cnn_model.pth"
+  hybrid_model: "animal_faces_model.pth"
+  comparison_chart: "comparison.png"
+  

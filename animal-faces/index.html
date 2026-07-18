@@ -101,6 +101,7 @@
         const predLabel = document.getElementById("pred-label");
         const predConf = document.getElementById("pred-conf");
         const probWrap = document.getElementById("prob-wrap");
+        const errorMsg = document.getElementById("error-msg");
 
         uploadArea.addEventListener("click", () => fileInput.click());
 
@@ -115,27 +116,44 @@
             // 请求API
             const formData = new FormData();
             formData.append("file", file);
+
+            resultBox.style.display = "none";
+            if (errorMsg) errorMsg.style.display = "none";
+
             const res = await fetch("http://127.0.0.1:8000/predict", {
                 method: "POST",
                 body: formData
             });
             const data = await res.json();
+
             // 渲染结果
             resultBox.style.display = "block";
-            predLabel.innerText = data.predict_class;
-            predConf.innerText = data.confidence;
-            // 清空概率条
-            probWrap.innerHTML = "";
-            for (const [cls, val] of Object.entries(data.all_prob)) {
-                const div = document.createElement("div");
-                div.className = "prob-item";
-                div.innerHTML = `
-                    <span>${cls}：${val}%</span>
-                    <div class="prob-bar-wrap">
-                        <div class="prob-bar" style="width:${val}%"></div>
-                    </div>
-                `;
-                probWrap.appendChild(div);
+
+            if (!res.ok) {
+                // 显示错误
+                predLabel.innerText = "请求失败";
+                predConf.innerText = data.detail || "未知错误";
+                probWrap.innerHTML = "";
+            } else if (data.predict_class) {
+                // 正常显示结果
+                predLabel.innerText = data.predict_class;
+                predConf.innerText = data.confidence ;
+                probWrap.innerHTML = "";
+                for (const [cls, val] of Object.entries(data.all_prob)) {
+                    const div = document.createElement("div");
+                    div.className = "prob-item";
+                    div.innerHTML = `
+                        <span>${cls}：${val}%</span>
+                        <div class="prob-bar-wrap">
+                            <div class="prob-bar" style="width:${val}%"></div>
+                        </div>
+                    `;
+                    probWrap.appendChild(div);
+                }
+            } else {
+                predLabel.innerText = "未知响应";
+                predConf.innerText = JSON.stringify(data);
+                probWrap.innerHTML = "";
             }
         }
     </script>

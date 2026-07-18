@@ -31,3 +31,8 @@ runs/
 .vscode/
 .agents/
 .codex/
+
+# 模型权重文件
+*.pth
+*.pt
+*.ckpt

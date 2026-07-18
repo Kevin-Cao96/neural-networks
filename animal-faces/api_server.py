@@ -9,13 +9,54 @@ from PIL import Image
 import io
 import traceback
 
+#激活虚拟环境
+#source /Users/yijiacao/network_env/bin/activate
+
 device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
+# ==================== 混合模型架构（跟训练脚本一致） ====================
+class ExtraCNNHead(nn.Module):
+    def __init__(self, in_c=2048, n_cls=3):
+        super().__init__()
+        self.cnn_stack = nn.Sequential(
+            nn.Conv2d(in_c, 1024, 3, padding=1), nn.BatchNorm2d(1024), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(1024, 512,  3, padding=1), nn.BatchNorm2d(512),  nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(512,  256,  3, padding=1), nn.BatchNorm2d(256),  nn.ReLU(),
+        )
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.cls  = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.3),
+            nn.Linear(256, n_cls)
+        )
+    def forward(self, x):
+        x = self.cnn_stack(x)
+        x = self.pool(x)
+        return self.cls(x)
+
+class HybridNet(nn.Module):
+    def __init__(self, n_cls=3):
+        super().__init__()
+        backbone = nn.Sequential(*list(models.resnet50(weights=None).children())[:-2])
+        self.backbone = backbone
+        self.head = ExtraCNNHead(2048, n_cls)
+
+    def forward(self, x):
+        feat = self.backbone(x)
+        return self.head(feat)
+
 # 加载模型
-model = models.resnet18(weights=None)
-model.fc = nn.Linear(model.fc.in_features, 3)
-model.load_state_dict(torch.load("animal_faces_model.pth", map_location=device))
-model.eval()
+model_loaded = False
+try:
+    model = HybridNet(n_cls=3)
+    model.load_state_dict(torch.load("animal_faces_model.pth", map_location=device))
+    model = model.to(device)
+    model.eval()
+    model_loaded = True
+    print("[api_server] 模型加载成功")
+except Exception as e:
+    print(f"[api_server] 模型加载失败: {e}")
+    print("[api_server] 请先运行 python3 animal-faces.py 训练模型")
 
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -41,6 +82,8 @@ def root():
 # 单图预测，返回置信度
 @app.post("/predict", response_class=JSONResponse)
 async def predict(file: UploadFile = File(...)):
+    if not model_loaded:
+        raise HTTPException(status_code=503, detail="模型未加载，请先运行 python3 animal-faces.py 训练模型")
     try:
         if not file.filename.endswith(("jpg", "jpeg", "png")):
             raise HTTPException(status_code=400, detail="仅支持jpg/png图片")
@@ -59,11 +102,13 @@ async def predict(file: UploadFile = File(...)):
         }
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="图片解析失败，上传清晰动物人脸")
+        raise HTTPException(status_code=500, detail=f"预测失败: {str(e)}")
 
-# 批量上传多张图片接口
+    # 批量上传多张图片接口
 @app.post("/batch_predict")
 async def batch_predict(files: list[UploadFile] = File(...)):
+    if not model_loaded:
+        raise HTTPException(status_code=503, detail="模型未加载，请先运行 python3 animal-faces.py 训练模型")
     res_list = []
     for file in files:
         img_bytes = await file.read()
