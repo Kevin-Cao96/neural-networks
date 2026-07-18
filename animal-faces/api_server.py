@@ -4,48 +4,23 @@ from fastapi.middleware.cors import CORSMiddleware
 import torch
 from torch import nn
 from torchvision.transforms import transforms
+from torchvision import models
 from PIL import Image
 import io
 import traceback
 
 device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
-class CNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.pooling = nn.MaxPool2d(2, 2)
-        self.relu = nn.ReLU()
-        self.flatten = nn.Flatten()
-        self.linear = nn.Linear(32768, 128)
-        self.output = nn.Linear(128, 3)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.pooling(x)
-        x = self.relu(x)
-        x = self.conv2(x)
-        x = self.pooling(x)
-        x = self.relu(x)
-        x = self.conv3(x)
-        x = self.pooling(x)
-        x = self.relu(x)
-        x = self.flatten(x)
-        x = self.linear(x)
-        x = self.output(x)
-        return x
-
 # 加载模型
-model = CNN().to(device)
+model = models.resnet18(weights=None)
+model.fc = nn.Linear(model.fc.in_features, 3)
 model.load_state_dict(torch.load("animal_faces_model.pth", map_location=device))
 model.eval()
 
 transform = transforms.Compose([
-    transforms.Resize((128, 128)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.ConvertImageDtype(torch.float)
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 class_names = ["cat", "dog", "wild"]
 

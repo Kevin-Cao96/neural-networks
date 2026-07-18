@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "animal-faces"
+version = "1.0.0"
+description = "猫狗野生动物分类系统"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "fastapi>=0.100.0",
+]
+
+[project.scripts]
+train = "animal_faces:main"
+serve = "api_server:main"

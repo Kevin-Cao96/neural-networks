@@ -1,19 +1,34 @@
 import torch
 from torch import nn
 from torch.optim import Adam
-from torchvision.transforms import transforms
+from torchvision import transforms
+from torchvision import models
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import LabelEncoder
 import matplotlib.pyplot as plt
+import random
 from PIL import Image
 from pathlib import Path
 import numpy as np
 import pandas as pd
 import os
 
-device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-print(device)
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+set_seed()
 
+device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+print(f"Device: {device}")
+
+# ============================================================
+# 数据加载
+# ============================================================
 image_path = []
 labels = []
 root = Path("./animal-faces/afhq")
@@ -30,116 +45,255 @@ test = left.drop(val.index)
 
 label_encoder = LabelEncoder()
 label_encoder.fit(data_df['labels'])
-print(label_encoder.classes_)
+print(f"类别: {label_encoder.classes_}")
 
-transform = transforms.Compose([
+# ============================================================
+# Transform（各模型用各自的）
+# ============================================================
+cnn_transform = transforms.Compose([
     transforms.Resize((128, 128)),
     transforms.ToTensor(),
     transforms.ConvertImageDtype(torch.float)
 ])
 
+hybrid_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# ============================================================
+# Dataset
+# ============================================================
 class ImageDataset(Dataset):
-  def __init__(self, dataframe, transform = None):
-    self.dataframe = dataframe
-    self.transform = transform
-    self.label = torch.tensor(label_encoder.transform(dataframe['labels'])).to(device)
+    def __init__(self, dataframe, transform=None):
+        self.dataframe = dataframe
+        self.transform = transform
+        self.label = torch.tensor(label_encoder.transform(dataframe['labels'])).to(device)
 
-  def __len__(self):
-    return self.dataframe.shape[0]
+    def __len__(self):
+        return self.dataframe.shape[0]
 
-  def __getitem__(self, idx):
-    img_path = self.dataframe.iloc[idx, 0]
-    label = self.label[idx]
+    def __getitem__(self, idx):
+        img_path = self.dataframe.iloc[idx, 0]
+        label = self.label[idx]
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image).to(device)
+        return image, label
 
-    image = Image.open(img_path).convert("RGB")
-  
-    if self.transform:
-      image = self.transform(image).to(device)
-  
-    return image, label
-  
-train_dataset = ImageDataset(dataframe = train, transform = transform)
-validation_dataset = ImageDataset(dataframe = val, transform = transform)
-test_dataset = ImageDataset(dataframe = test, transform = transform)  
+cnn_train = ImageDataset(train, cnn_transform)
+cnn_val   = ImageDataset(val,   cnn_transform)
+cnn_test  = ImageDataset(test,  cnn_transform)
 
-lr = 1e-4
-BATCH_SIZE = 16
-EPOCH = 10
-train_dataloader = DataLoader(train_dataset, batch_size = BATCH_SIZE, shuffle = True)
-validation_dataloader = DataLoader(validation_dataset, batch_size = BATCH_SIZE, shuffle = True)
-test_dataloader = DataLoader(test_dataset, batch_size = BATCH_SIZE, shuffle = True)
+hy_train  = ImageDataset(train, hybrid_transform)
+hy_val    = ImageDataset(val,   hybrid_transform)
+hy_test   = ImageDataset(test,  hybrid_transform)
 
+# ============================================================
+# 模型 1：原始 CNN（对比 baseline）
+# ============================================================
 class CNN(nn.Module):
-  def __init__(self):
-    super().__init__()
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.pool  = nn.MaxPool2d(2, 2)
+        self.relu  = nn.ReLU()
+        self.flatten = nn.Flatten()
+        self.linear  = nn.Linear(128 * 16 * 16, 128)
+        self.output  = nn.Linear(128, len(data_df['labels'].unique()))
 
-    self.conv1 = nn.Conv2d(3, 32, kernel_size = 3, padding = 1)
-    self.conv2 = nn.Conv2d(32, 64, kernel_size = 3, padding = 1)
-    self.conv3 = nn.Conv2d(64, 128, kernel_size = 3, padding = 1)
+    def forward(self, x):
+        x = self.relu(self.pool(self.conv1(x)))
+        x = self.relu(self.pool(self.conv2(x)))
+        x = self.relu(self.pool(self.conv3(x)))
+        x = self.flatten(x)
+        x = self.output(self.relu(self.linear(x)))
+        return x
 
-    self.pooling = nn.MaxPool2d(2, 2)
+# ============================================================
+# 模型 2：ResNet50 骨干 + 三层 CNN 头部（你要的混合架构）
+# ============================================================
+class ExtraCNNHead(nn.Module):
+    def __init__(self, in_c=2048, n_cls=3):
+        super().__init__()
+        self.cnn_stack = nn.Sequential(
+            nn.Conv2d(in_c, 1024, 3, padding=1), nn.BatchNorm2d(1024), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(1024, 512,  3, padding=1), nn.BatchNorm2d(512),  nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(512,  256,  3, padding=1), nn.BatchNorm2d(256),  nn.ReLU(),
+        )
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.cls  = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.3),
+            nn.Linear(256, n_cls)
+        )
 
-    self.relu = nn.ReLU()
+    def forward(self, x):
+        x = self.cnn_stack(x)
+        x = self.pool(x)
+        return self.cls(x)
 
-    self.flatten = nn.Flatten()
-    self.linear = nn.Linear((128*16*16), 128)
+class HybridNet(nn.Module):
+    def __init__(self, n_cls=3):
+        super().__init__()
+        backbone = nn.Sequential(*list(models.resnet50(weights="IMAGENET1K_V2").children())[:-2])
+        self.backbone = backbone
+        self.head = ExtraCNNHead(2048, n_cls)
 
-    self.output = nn.Linear(128, len(data_df['labels'].unique()))
-  
-  def forward(self,x):
-    x = self.conv1(x)
-    x = self.pooling(x)
-    x = self.relu(x)
+    def forward(self, x):
+        feat = self.backbone(x)
+        return self.head(feat)
 
-    x = self.conv2(x)
-    x = self.pooling(x)
-    x = self.relu(x)
+# ============================================================
+# 训练函数（两个模型共用）
+# ============================================================
+def train_model(model, name, train_loader, val_loader, test_loader, epochs, lr=1e-4):
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
 
-    x = self.conv3(x)
-    x = self.pooling(x)
-    x = self.relu(x)
+    # 只训练 requires_grad=True 的参数
+    trainable = filter(lambda p: p.requires_grad, model.parameters())
+    optimizer = Adam(trainable, lr=lr)
 
-    x = self.flatten(x)
-    x = self.linear(x)
-    x = self.output(x)
+    history = {"train_loss": [], "val_loss": [], "train_acc": [], "val_acc": [], "test_acc": []}
 
-    return x
+    for epoch in range(epochs):
+        # --- 训练 ---
+        model.train()
+        total_loss = 0
+        correct = 0
+        total = 0
+        for inputs, labels in train_loader:
+            outputs = model(inputs).squeeze(1)
+            loss = criterion(outputs, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
-model = CNN().to(device)
+        train_loss = total_loss / len(train_loader)
+        train_acc  = correct / total
 
-criterion = nn.CrossEntropyLoss()
-optimizer = Adam(model.parameters(), lr = lr)
+        # --- 验证 ---
+        model.eval()
+        val_loss = 0
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                outputs = model(inputs).squeeze(1)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
 
-for epoch in range(EPOCH):
-    train_acc = 0
-    validation_acc = 0
-    total_loss_train = 0
-    total_loss_val = 0
-    testing_acc = 0
-    for data in train_dataloader:
-        input, label = data
-        prediction = model(input).squeeze(1)
-        train_loss = criterion(prediction, label)
-        total_loss_train += train_loss.item()
-        acc = (torch.argmax(prediction, dim=1) == label).sum().item()
-        train_acc+= acc
-        optimizer.zero_grad()
-        train_loss.backward()
-        optimizer.step()
-    with torch.no_grad():
-        for data in validation_dataloader:
-            input, label = data
-            prediction = model(input).squeeze(1)
-            val_loss = criterion(prediction, label)
-            total_loss_val += val_loss.item()
-            acc = (torch.argmax(prediction, dim=1) == label).sum().item()
-            validation_acc+= acc
-    with torch.no_grad():
-        for data in test_dataloader:
-            input, label = data
-            prediction = model(input).squeeze(1)
-            acc = (torch.argmax(prediction, dim=1) == label).sum().item()
-            testing_acc+= acc
-    print(f"Epoch: {epoch}        train_loss: {round(total_loss_train/train_dataloader.__len__(),4)}        val_loss: {round(total_loss_val/validation_dataloader.__len__(), 4)}        train_acc_rate: {round(train_acc/train_dataset.__len__(), 4)}       val_acc_rate: {round(validation_acc/validation_dataset.__len__(), 4)}       test_acc: {testing_acc/test_dataset.__len__():.4f}")
+        val_loss = val_loss / len(val_loader)
+        val_acc  = val_correct / val_total
 
-torch.save(model.state_dict(), "./animal-faces/animal_faces_model.pth")
+        # --- 测试 ---
+        test_correct = 0
+        test_total = 0
+        with torch.no_grad():
+            for inputs, labels in test_loader:
+                outputs = model(inputs).squeeze(1)
+                _, predicted = torch.max(outputs, 1)
+                test_total += labels.size(0)
+                test_correct += (predicted == labels).sum().item()
+        test_acc = test_correct / test_total
+
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["train_acc"].append(train_acc)
+        history["val_acc"].append(val_acc)
+        history["test_acc"].append(test_acc)
+
+        print(f"[{name}] Epoch {epoch:2d} | train_loss: {train_loss:.4f} | val_loss: {val_loss:.4f} | "
+              f"train_acc: {train_acc:.4f} | val_acc: {val_acc:.4f} | test_acc: {test_acc:.4f}")
+
+    return history
+
+# ============================================================
+# 训练 1：原始 CNN
+# ============================================================
+print("=" * 60)
+print("训练 [CNN] — 从头学的 3 层卷积")
+print("=" * 60)
+cnn_loader  = DataLoader(cnn_train, batch_size=16, shuffle=True)
+cnn_v_loader = DataLoader(cnn_val,  batch_size=16, shuffle=False)
+cnn_t_loader = DataLoader(cnn_test, batch_size=16, shuffle=False)
+
+cnn_model = CNN()
+cnn_hist = train_model(cnn_model, "CNN",
+                       cnn_loader, cnn_v_loader, cnn_t_loader,
+                       epochs=10, lr=1e-4)
+torch.save(cnn_model.state_dict(), "cnn_model.pth")
+
+# ============================================================
+# 训练 2：Hybrid（ResNet50 骨干 + CNN 头）
+# ============================================================
+print()
+print("=" * 60)
+print("训练 [Hybrid] — ResNet50骨干 + 3层CNN头（骨干冻结）")
+print("=" * 60)
+hy_loader  = DataLoader(hy_train, batch_size=32, shuffle=True)
+hy_v_loader = DataLoader(hy_val,  batch_size=32, shuffle=False)
+hy_t_loader = DataLoader(hy_test, batch_size=32, shuffle=False)
+
+hy_model = HybridNet(n_cls=len(data_df['labels'].unique()))
+# 冻结骨干参数
+for p in hy_model.backbone.parameters():
+    p.requires_grad = False
+print(f"  骨干参数: {sum(p.numel() for p in hy_model.backbone.parameters()):,} (冻结)")
+print(f"  头部参数: {sum(p.numel() for p in hy_model.head.parameters()):,} (可训练)")
+
+hy_hist = train_model(hy_model, "Hybrid",
+                      hy_loader, hy_v_loader, hy_t_loader,
+                      epochs=15, lr=1e-4)
+torch.save(hy_model.state_dict(), "animal_faces_model.pth")
+
+# ============================================================
+# 对比
+# ============================================================
+print()
+print("=" * 60)
+print("           CNN vs Hybrid 对比")
+print("=" * 60)
+print(f"{'Metric':<22} {'CNN':>12} {'Hybrid':>12}")
+print("-" * 48)
+best_cnn  = max(cnn_hist['test_acc'])
+best_hy   = max(hy_hist['test_acc'])
+final_cnn = cnn_hist['test_acc'][-1]
+final_hy  = hy_hist['test_acc'][-1]
+print(f"{'Best Test Acc':<22} {best_cnn:>11.2%} {best_hy:>11.2%}")
+print(f"{'Final Test Acc':<22} {final_cnn:>11.2%} {final_hy:>11.2%}")
+print(f"{'Epochs':<22} {10:>12} {15:>12}")
+print(f"{'Input Size':<22} {'128x128':>12} {'224x224':>12}")
+print(f"{'Params (total)':<22} {sum(p.numel() for p in cnn_model.parameters()):>12,} {sum(p.numel() for p in hy_model.parameters()):>12,}")
+print(f"{'Params (trainable)':<22} {sum(p.numel() for p in cnn_model.parameters()):>12,} {sum(p.numel() for p in hy_model.parameters() if p.requires_grad):>12,}")
+
+# 画对比图
+plt.figure(figsize=(12, 4))
+plt.subplot(1, 2, 1)
+plt.plot(cnn_hist["train_acc"], label="CNN train", ls="--")
+plt.plot(cnn_hist["val_acc"],   label="CNN val")
+plt.plot(hy_hist["train_acc"],  label="Hybrid train", ls="--")
+plt.plot(hy_hist["val_acc"],    label="Hybrid val")
+plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.legend(); plt.title("Accuracy")
+
+plt.subplot(1, 2, 2)
+plt.plot(cnn_hist["train_loss"], label="CNN train", ls="--")
+plt.plot(cnn_hist["val_loss"],   label="CNN val")
+plt.plot(hy_hist["train_loss"],  label="Hybrid train", ls="--")
+plt.plot(hy_hist["val_loss"],    label="Hybrid val")
+plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend(); plt.title("Loss")
+
+plt.tight_layout()
+plt.savefig("comparison.png", dpi=150)
+print("\n对比图已保存 → comparison.png")
