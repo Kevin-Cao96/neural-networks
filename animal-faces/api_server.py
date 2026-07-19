@@ -75,9 +75,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {"msg": "高级动物分类接口文档：/docs"}
+@app.get("/test_api")
+def test_api():
+    return {"code": 200, "msg": "GET接口测试成功"}
 
 # 单图预测，返回置信度
 @app.post("/predict", response_class=JSONResponse)
