@@ -1,6 +1,7 @@
 #!/bin/zsh
 set -e
-git pull origin main --allow-unrelated-histories
+cd "$(dirname "$0")"
+git pull origin main
 git add .
-git commit -m "update"
+git commit -m "${1:-update}"    # 传参就用参数，没传就用 "update"
 git push origin main

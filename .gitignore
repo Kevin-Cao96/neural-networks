@@ -23,6 +23,14 @@ runs/
 # Notebook auto-saves
 .ipynb_checkpoints/
 
+# Test & coverage
+.coverage
+htmlcov/
+
+# Generated images
+*.png
+*.svg
+
 __pycache__/
 *.pyc
 *.pth
