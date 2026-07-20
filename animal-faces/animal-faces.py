@@ -64,6 +64,14 @@ label_encoder.fit(data_df['labels'])
 print(f"类别: {label_encoder.classes_}")
 
 hy_size = cfg["models"]["hybrid"]["input_size"]
+
+cnn_transform = transforms.Compose([
+    transforms.Resize((128, 128)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5])]
+)
+
 hybrid_transform = transforms.Compose([
     transforms.Resize((hy_size, hy_size)),
     transforms.ToTensor(),
@@ -90,9 +98,35 @@ class ImageDataset(Dataset):
             image = self.transform(image).to(device)
         return image, label
 
+cnn_train = ImageDataset(train, cnn_transform)
+cnn_val   = ImageDataset(val,   cnn_transform)
+cnn_test  = ImageDataset(test,  cnn_transform)
+
 hy_train  = ImageDataset(train, hybrid_transform)
 hy_val    = ImageDataset(val,   hybrid_transform)
 hy_test   = ImageDataset(test,  hybrid_transform)
+
+# 模型 1：原始 CNN（对比 baseline）
+# ============================================================
+class CNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.pool  = nn.MaxPool2d(2, 2)
+        self.relu  = nn.ReLU()
+        self.flatten = nn.Flatten()
+        self.linear  = nn.Linear(128 * 16 * 16, 128)
+        self.output  = nn.Linear(128, len(data_df['labels'].unique()))
+
+    def forward(self, x):
+        x = self.relu(self.pool(self.conv1(x)))
+        x = self.relu(self.pool(self.conv2(x)))
+        x = self.relu(self.pool(self.conv3(x)))
+        x = self.flatten(x)
+        x = self.output(self.relu(self.linear(x)))
+        return x
 
 # ============================================================
 # 模型 2：ResNet50 骨干 + 三层 CNN 
@@ -116,7 +150,7 @@ class ExtraCNNHead(nn.Module):
         x = self.cnn_stack(x)
         x = self.pool(x)
         return self.cls(x)
-
+    
 class HybridNet(nn.Module):
     def __init__(self, n_cls=3):
         super().__init__()
@@ -203,6 +237,23 @@ def train_model(model, name, train_loader, val_loader, test_loader, epochs, lr=1
     return history
 
 # ============================================================
+# 训练 1：原始 CNN
+# ============================================================
+print("=" * 60)
+print("训练 [CNN] — 从头学的 3 层卷积")
+print("=" * 60)
+cnn_bs = cfg["models"]["cnn"]["batch_size"]
+cnn_loader  = DataLoader(cnn_train, batch_size=cnn_bs, shuffle=True)
+cnn_v_loader = DataLoader(cnn_val,  batch_size=cnn_bs, shuffle=False)
+cnn_t_loader = DataLoader(cnn_test, batch_size=cnn_bs, shuffle=False)
+
+cnn_model = CNN()
+cnn_hist = train_model(cnn_model, "CNN",
+                       cnn_loader, cnn_v_loader, cnn_t_loader,
+                       epochs=cfg["models"]["cnn"]["epochs"], lr=float(cfg["train"]["lr"]))
+torch.save(cnn_model.state_dict(), cfg["output"]["cnn_model"])
+
+# ============================================================
 # 训练 2：Hybrid（ResNet50 骨干 + CNN 头）
 # ============================================================
 print()
@@ -231,26 +282,33 @@ torch.save(hy_model.state_dict(), cfg["output"]["hybrid_model"])
 # ============================================================
 print()
 print("=" * 60)
-print("           Hybrid 训练结果")
+print("           CNN vs Hybrid 对比")
 print("=" * 60)
-print(f"{'Metric':<22} {'Hybrid':>12}")
-print("-" * 36)
-best_acc = max(hy_hist['test_acc'])
-final_acc = hy_hist['test_acc'][-1]
-print(f"{'Best Test Acc':<22} {best_acc:>11.2%}")
-print(f"{'Final Test Acc':<22} {final_acc:>11.2%}")
-print(f"{'Epochs':<22} {cfg['models']['hybrid']['epochs']:>12}")
-print(f"{'Input Size':<22} {cfg['models']['hybrid']['input_size']:>12}")
-print(f"{'Params (trainable)':<22} {sum(p.numel() for p in hy_model.parameters() if p.requires_grad):>12,}")
+print(f"{'Metric':<22} {'CNN':>12} {'Hybrid':>12}")
+print("-" * 48)
+best_cnn  = max(cnn_hist['test_acc'])
+best_hy   = max(hy_hist['test_acc'])
+final_cnn = cnn_hist['test_acc'][-1]
+final_hy  = hy_hist['test_acc'][-1]
+print(f"{'Best Test Acc':<22} {best_cnn:>11.2%} {best_hy:>11.2%}")
+print(f"{'Final Test Acc':<22} {final_cnn:>11.2%} {final_hy:>11.2%}")
+print(f"{'Epochs':<22} {10:>12} {15:>12}")
+print(f"{'Input Size':<22} {'128x128':>12} {'224x224':>12}")
+print(f"{'Params (total)':<22} {sum(p.numel() for p in cnn_model.parameters()):>12,} {sum(p.numel() for p in hy_model.parameters()):>12,}")
+print(f"{'Params (trainable)':<22} {sum(p.numel() for p in cnn_model.parameters()):>12,} {sum(p.numel() for p in hy_model.parameters() if p.requires_grad):>12,}")
 
 # 画对比图
 plt.figure(figsize=(12, 4))
 plt.subplot(1, 2, 1)
+plt.plot(cnn_hist["train_acc"], label="CNN train", ls="--")
+plt.plot(cnn_hist["val_acc"],   label="CNN val")
 plt.plot(hy_hist["train_acc"],  label="Hybrid train", ls="--")
 plt.plot(hy_hist["val_acc"],    label="Hybrid val")
 plt.xlabel("Epoch"); plt.ylabel("Accuracy"); plt.legend(); plt.title("Accuracy")
 
 plt.subplot(1, 2, 2)
+plt.plot(cnn_hist["train_loss"], label="CNN train", ls="--")
+plt.plot(cnn_hist["val_loss"],   label="CNN val")
 plt.plot(hy_hist["train_loss"],  label="Hybrid train", ls="--")
 plt.plot(hy_hist["val_loss"],    label="Hybrid val")
 plt.xlabel("Epoch"); plt.ylabel("Loss"); plt.legend(); plt.title("Loss")
